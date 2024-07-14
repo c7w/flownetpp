@@ -15,7 +15,7 @@ accelerate launch --config_file "train/config.yml" \
  --reward_model_name_or_path=$REWARDMODEL_DIR \
  --output_dir=$OUTPUT_DIR \
  --task_name="segmentation" \
- --dataset_name="limingcv/Captioned_ADE20K" \
+ --dataset_name="/Node10_nvme/Captioned_ADE20K/data" \
  --caption_column="prompt" \
  --conditioning_image_column="control_seg" \
  --cache_dir="data/huggingface_datasets" \

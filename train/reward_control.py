@@ -835,10 +835,11 @@ def make_train_dataset(args, tokenizer, accelerator, split='train'):
                 keep_in_memory=args.keep_in_memory,
             )
         else:
-            dataset = load_from_disk(
-                dataset_path=args.dataset_name,
-                keep_in_memory=args.keep_in_memory,
-            )
+            # dataset = load_from_disk(
+            #     dataset_path=args.dataset_name,
+            #     keep_in_memory=args.keep_in_memory,
+            # )
+            dataset = load_dataset('parquet', data_files=f'{args.dataset_name}/*.parquet')
     else:
         if args.train_data_dir is not None:
             dataset = load_dataset(
