@@ -51,7 +51,8 @@ def get_reward_loss(predictions, labels, task='segmentation', **args):
         torch.nn.Module: Loss class.
     """
     if task == 'segmentation':
-        return nn.functional.cross_entropy(predictions, labels, **args)
+        # import IPython; IPython.embed()
+        return nn.functional.cross_entropy(predictions, labels, ignore_index=255, **args)
     elif task == 'canny':
         loss = nn.functional.mse_loss(predictions, labels, **args).mean(2)
         return loss.mean((-1,-2))
@@ -84,9 +85,9 @@ def map_color_to_index(image, dataset='limingcv/Captioned_ADE20K'):
     Returns:
         torch.tensor: mask tensor with shape (N, H, W).
     """
-    if dataset == 'limingcv/Captioned_ADE20K':
+    if 'ADE20K' in dataset:
         palette = np.load('ade20k_palette.npy')
-    elif dataset == 'limingcv/Captioned_COCOStuff':
+    elif 'COCOStuff' in dataset:
         palette = np.load('coco_stuff_palette.npy')
     else:
         raise NotImplementedError("Only support ADE20K and COCO-Stuff dataset for now.")
@@ -126,7 +127,7 @@ def seg_label_transform(
         torch.tensor: formatted labels for loss computation.
     """
 
-    if dataset_name == 'limingcv/Captioned_ADE20K':
+    if 'ADE20K' in dataset_name:
         labels = map_color_to_index(labels, dataset_name)
         labels = F.resize(labels, output_size, interpolation, max_size, antialias)
 
@@ -134,7 +135,7 @@ def seg_label_transform(
         # In a unified format, we use 255 to represent the background class for both ADE20K and COCO-Stuff
         labels = labels - 1
         labels[labels == -1] = 255
-    elif dataset_name == 'limingcv/Captioned_COCOStuff':
+    elif 'COCOStuff' in dataset_name:
         labels = F.resize(labels, output_size, interpolation, max_size, antialias)
 
     return labels.long()

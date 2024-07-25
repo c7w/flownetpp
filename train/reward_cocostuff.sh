@@ -15,7 +15,7 @@ accelerate launch --config_file "train/config.yml" \
  --reward_model_name_or_path=$REWARDMODEL_DIR \
  --output_dir=$OUTPUT_DIR \
  --task_name="segmentation" \
- --dataset_name="limingcv/Captioned_COCOStuff" \
+ --dataset_name="/mnt/nvme01/Tsinghua_Node10/Captioned_COCOStuff" \
  --caption_column="prompt" \
  --conditioning_image_column="control_seg" \
  --label_column="panoptic_seg_map" \

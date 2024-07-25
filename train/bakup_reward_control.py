@@ -19,7 +19,6 @@ import kornia
 import pickle
 import random
 import logging
-import copy
 import argparse
 
 import torch
@@ -40,7 +39,7 @@ from datetime import datetime
 
 import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
-import rectified_flow
+from rectified_flow import RFlowScheduler
 
 from PIL import Image
 from pathlib import Path
@@ -134,7 +133,7 @@ def log_validation(
         torch_dtype=weight_dtype,
     )
     if args.rflow:
-        pipeline.scheduler = rectified_flow.FlowMatchEulerDiscreteScheduler(num_train_timesteps=1000, shift=3.0)
+        pipeline.scheduler = RFlowScheduler()
     else:
         pipeline.scheduler = UniPCMultistepScheduler.from_config(pipeline.scheduler.config)
     pipeline = pipeline.to(accelerator.device)
@@ -777,32 +776,9 @@ def parse_args(input_args=None):
             " more information see https://huggingface.co/docs/accelerate/v0.17.0/en/package_reference/accelerator#accelerate.Accelerator"
         ),
     )
-    
-    ## Rectified flow
     parser.add_argument(
         "--rflow", action="store_true"
     )
-    parser.add_argument(
-        "--weighting_scheme",
-        type=str,
-        default="logit_normal",
-        choices=["sigma_sqrt", "logit_normal", "mode", "cosmap"],
-    )
-    parser.add_argument(
-        "--logit_mean", type=float, default=0.0, help="mean to use when using the `'logit_normal'` weighting scheme."
-    )
-    parser.add_argument("--logit_std", type=float, default=1.0, help="std to use when using the `'logit_normal'` weighting scheme.")
-    parser.add_argument(
-        "--mode_scale",
-        type=float,
-        default=1.29,
-        help="Scale of mode weighting scheme. Only effective when using the `'mode'` as the `weighting_scheme`.",
-    )
-    parser.add_argument(
-        "--tune_sd", action="store_true"
-    )
-    parser.add_argument("--exp_name", type=str, default="debug")
-    
 
     if input_args is not None:
         args = parser.parse_args(input_args)
@@ -1067,7 +1043,7 @@ def collate_fn(examples):
 
 
 def main(args):
-    current_time = args.exp_name + "_" + datetime.now().strftime("%b%d_%H-%M-%S")
+    current_time = datetime.now().strftime("%b%d_%H-%M-%S")
     args.output_dir = os.path.join(args.output_dir, current_time)
     
     logging_dir = Path(args.output_dir, args.logging_dir)
@@ -1136,8 +1112,7 @@ def main(args):
     # Load scheduler and models
     # noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
     if args.rflow:
-        noise_scheduler = rectified_flow.FlowMatchEulerDiscreteScheduler(num_train_timesteps=1000, shift=3.0)
-        noise_scheduler_copy = copy.deepcopy(noise_scheduler)
+        noise_scheduler = RFlowScheduler()  #! [c7w] change scheduler here....
     else:
         noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
     
@@ -1257,11 +1232,7 @@ def main(args):
 
     # Optimizer creation
     # optimized_parameters = list(controlnet.parameters()) + list(reward_model.parameters()) + list(unet.parameters())
-    if args.tune_sd:
-        trainable_parameters = list(controlnet.parameters()) + list(unet.parameters())
-    else:
-        trainable_parameters = list(controlnet.parameters()) 
-
+    trainable_parameters = list(controlnet.parameters()) + list(unet.parameters())
     optimizer = optimizer_class(
         trainable_parameters,
         lr=args.learning_rate,
@@ -1442,62 +1413,7 @@ def main(args):
 
 
                 if args.rflow:
-                    noise = torch.randn_like(latents)
-                    bsz = latents.shape[0]
-                    
-                    # Sample a random timestep for each image
-                    # for weighting schemes where we sample timesteps non-uniformly
-                    u = rectified_flow.compute_density_for_timestep_sampling(
-                        weighting_scheme=args.weighting_scheme,
-                        batch_size=bsz,
-                        logit_mean=args.logit_mean,
-                        logit_std=args.logit_std,
-                        mode_scale=args.mode_scale,
-                    )
-                    indices = (u * noise_scheduler_copy.config.num_train_timesteps).long()
-                    timesteps = noise_scheduler_copy.timesteps[indices].to(device=accelerator.device)
-                    
-                    sigmas = rectified_flow.get_sigmas(noise_scheduler_copy, timesteps, accelerator, n_dim=latents.ndim, dtype=weight_dtype)
-                    noisy_latents = sigmas * noise + (1.0 - sigmas) * latents
-                    
-                    down_block_res_samples, mid_block_res_sample = controlnet(
-                        noisy_latents,
-                        timesteps,
-                        encoder_hidden_states=encoder_hidden_states,
-                        controlnet_cond=controlnet_image,
-                        return_dict=False,
-                    )
-
-                    # Predict the noise residual
-                    model_pred = unet(
-                        noisy_latents,
-                        timesteps,
-                        encoder_hidden_states=encoder_hidden_states,
-                        down_block_additional_residuals=[
-                            sample.to(dtype=weight_dtype) for sample in down_block_res_samples
-                        ],
-                        mid_block_additional_residual=mid_block_res_sample.to(dtype=weight_dtype),
-                    ).sample
-
-                    # Follow: Section 5 of https://arxiv.org/abs/2206.00364.
-                    # Preconditioning of the model outputs.
-                    model_pred = model_pred * (-sigmas) + noisy_latents
-
-                    # these weighting schemes use a uniform timestep sampling
-                    # and instead post-weight the loss
-                    weighting = rectified_flow.compute_loss_weighting_for_sd3(weighting_scheme=args.weighting_scheme, sigmas=sigmas)
-
-                    # flow matching loss
-                    target = latents
-
-                    # Compute regular loss. TODO simplify this
-                    loss = torch.mean(
-                        (weighting.float() * (model_pred.float() - target.float()) ** 2).reshape(target.shape[0], -1),
-                        1,
-                    )
-                    pretrain_loss = loss.mean()
-                    
-                    # pretrain_loss = noise_scheduler.training_losses(controlnet, unet, latents, model_kwargs=dict(encoder_hidden_states=encoder_hidden_states, controlnet_cond=controlnet_image), weight_dtype=weight_dtype).mean()
+                    pretrain_loss = noise_scheduler.training_losses(controlnet, unet, latents, model_kwargs=dict(encoder_hidden_states=encoder_hidden_states, controlnet_cond=controlnet_image), weight_dtype=weight_dtype).mean()
                     
                     reward_loss = torch.tensor(0.0, device=accelerator.device)
 
