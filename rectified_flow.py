@@ -61,6 +61,42 @@ def compute_loss_weighting_for_sd3(weighting_scheme: str, sigmas=None):
     return weighting
 
 
+class ModelSamplingDiscreteFlow:
+    """Helper for sampler scheduling (ie timestep/sigma calculations) for Discrete Flow models"""
+
+    def __init__(self, shift=1.0):
+        self.shift = shift
+        timesteps = 1000
+        self.sigmas = self.sigma(torch.arange(1, timesteps + 1, 1))
+
+    @property
+    def sigma_min(self):
+        return self.sigmas[0]
+
+    @property
+    def sigma_max(self):
+        return self.sigmas[-1]
+
+    def timestep(self, sigma):
+        return sigma * 1000
+
+    def sigma(self, timestep: torch.Tensor):
+        timestep = timestep / 1000.0
+        if self.shift == 1.0:
+            return timestep
+        return self.shift * timestep / (1 + (self.shift - 1) * timestep)
+
+    def calculate_denoised(self, sigma, model_output, model_input):
+        sigma = sigma.view(sigma.shape[:1] + (1,) * (model_output.ndim - 1))
+        return model_input - model_output * sigma
+
+    def noise_scaling(self, sigma, noise, latent_image, max_denoise=False):
+        # assert max_denoise is False, "max_denoise not implemented"
+        # max_denoise is always True, I'm not sure why it's there
+        return sigma * noise + (1.0 - sigma) * latent_image
+
+
+
 @dataclass
 class FlowMatchEulerDiscreteSchedulerOutput(BaseOutput):
     """
@@ -288,8 +324,7 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
                 ),
             )
 
-        if self.step_index is None:
-            self._init_step_index(timestep)
+        self._init_step_index(timestep)
 
         # Upcast to avoid precision issues when computing prev_sample
         sample = sample.to(torch.float32)
@@ -326,9 +361,9 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
         self._step_index += 1
 
         if not return_dict:
-            return (prev_sample,)
+            return (prev_sample, denoised)
 
-        return FlowMatchEulerDiscreteSchedulerOutput(prev_sample=prev_sample)
+        return FlowMatchEulerDiscreteSchedulerOutput(prev_sample=prev_sample, pred_original_sample=denoised)
 
     def __len__(self):
         return self.config.num_train_timesteps

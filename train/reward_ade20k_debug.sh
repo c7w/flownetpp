@@ -8,7 +8,7 @@ export HF_ENDPOINT=https://hf-mirror.com
 # export WANDB_DISABLED=1
 export WANDB_API_KEY=48cd7beeac132a453ceb4db996fa8cb69bceb062
 export WANDB_ENTITY=c7w
-# export CUDA_VISIBLE_DEVICES=6
+export CUDA_VISIBLE_DEVICES=1
 
 
 
@@ -21,8 +21,8 @@ python3 -c "from huggingface_hub import hf_hub_download; hf_hub_download(repo_id
 
 # --dataset_name="/Node10_nvme/Captioned_ADE20K/data" \
 # reward fine-tuning
-accelerate launch --config_file "train/config.yml" \
- --main_process_port=23157 train/reward_control.py \
+accelerate launch --config_file "train/debug.yml" \
+ --main_process_port=23159 train/reward_control.py \
  --pretrained_model_name_or_path=$MODEL_DIR \
  --controlnet_model_name_or_path=$CONTROLNET_DIR \
  --reward_model_name_or_path=$REWARDMODEL_DIR \
@@ -33,13 +33,13 @@ accelerate launch --config_file "train/config.yml" \
  --conditioning_image_column="control_seg" \
  --cache_dir="data/huggingface_datasets" \
  --resolution=512 \
- --train_batch_size=12 \
+ --train_batch_size=2 \
  --gradient_accumulation_steps=4 \
  --learning_rate=1e-5 \
  --mixed_precision="fp16" \
  --gradient_checkpointing \
  --dataloader_num_workers=16 \
- --max_train_steps=8100 \
+ --max_train_steps=10010 \
  --lr_scheduler="constant_with_warmup" \
  --lr_warmup_steps=200 \
  --checkpointing_steps=2000 \

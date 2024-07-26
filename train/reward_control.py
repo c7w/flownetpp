@@ -801,6 +801,9 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--tune_sd", action="store_true"
     )
+    parser.add_argument(
+        "--linear_reward_scale_steps", default=5000, type=int, help="Number of steps to linearly increase the reward weight."
+    )
     parser.add_argument("--exp_name", type=str, default="debug")
     
 
@@ -1162,27 +1165,29 @@ def main(args):
     if version.parse(accelerate.__version__) >= version.parse("0.16.0"):
         # create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a nice format
         def save_model_hook(models, weights, output_dir):
-            i = len(weights) - 1
+            
+            save_names = [str(x.__class__.__name__) for x in models]
 
-            while len(weights) > 0:
-                weights.pop()
+            for i in range(len(save_names)):
+                save_name = save_names[i]
                 model = models[i]
+                model.save_pretrained(os.path.join(output_dir, save_name))
 
-                sub_dir = "controlnet"
-                model.save_pretrained(os.path.join(output_dir, sub_dir))
-
-                i -= 1
 
         def load_model_hook(models, input_dir):
+            load_names = [str(x.__class__.__name__) for x in models]
             while len(models) > 0:
                 # pop models so that they are not loaded again
                 model = models.pop()
-
-                # load diffusers style into model
-                load_model = ControlNetModel.from_pretrained(input_dir, subfolder="controlnet")
+                if type(model) == ControlNetModel:
+                    load_name = "ControlNetModel"
+                    load_model = ControlNetModel.from_pretrained(input_dir, subfolder=load_name)
+                elif type(model) == UNet2DConditionModel:
+                    load_name = "UNet2DConditionModel"
+                    load_model = UNet2DConditionModel.from_pretrained(input_dir, subfolder=load_name)
                 model.register_to_config(**load_model.config)
-
                 model.load_state_dict(load_model.state_dict())
+                # ['UNet2DConditionModel', 'ControlNetModel']
                 del load_model
 
         accelerator.register_save_state_pre_hook(save_model_hook)
@@ -1309,8 +1314,8 @@ def main(args):
     # unet, reward_model = accelerator.prepare(unet, reward_model)
 
     # Prepare others after preparing the model
-    controlnet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-        controlnet, optimizer, train_dataloader, lr_scheduler
+    unet, controlnet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+        unet, controlnet, optimizer, train_dataloader, lr_scheduler
     )
 
     # For mixed precision training we cast the text_encoder and vae weights to half-precision
@@ -1323,7 +1328,7 @@ def main(args):
 
     # Move vae, unet and text_encoder to device and cast to weight_dtype
     vae.to(accelerator.device, dtype=weight_dtype)
-    unet.to(accelerator.device, dtype=weight_dtype)
+    # unet.to(accelerator.device, dtype=weight_dtype)
     text_encoder.to(accelerator.device, dtype=weight_dtype)
     reward_model.to(accelerator.device, dtype=weight_dtype)
     reward_model.eval()
@@ -1407,7 +1412,7 @@ def main(args):
         train_loss, train_pretrain_loss, train_reward_loss = 0., 0., 0.
 
         for step, batch in enumerate(train_dataloader):
-            with accelerator.accumulate(controlnet):
+            with accelerator.accumulate(unet, controlnet):
                 encoder_hidden_states = text_encoder(batch["input_ids"])[0]  # text condition
                 controlnet_image = batch["conditioning_pixel_values"].to(dtype=weight_dtype)  # image condition
 
@@ -1496,12 +1501,101 @@ def main(args):
                         1,
                     )
                     pretrain_loss = loss.mean()
-                    
-                    # pretrain_loss = noise_scheduler.training_losses(controlnet, unet, latents, model_kwargs=dict(encoder_hidden_states=encoder_hidden_states, controlnet_cond=controlnet_image), weight_dtype=weight_dtype).mean()
-                    
-                    reward_loss = torch.tensor(0.0, device=accelerator.device)
 
-                    loss = pretrain_loss
+                    pred_original_sample = [
+                        noise_scheduler.step(noise, t, noisy_latent).pred_original_sample.to(weight_dtype) \
+                            for (noise, t, noisy_latent) in zip(model_pred, timesteps, noisy_latents)
+                    ]
+                    pred_original_sample = torch.stack(pred_original_sample)
+                    
+
+                    # Map the denoised latents into RGB images
+                    pred_original_sample = 1 / vae.config.scaling_factor * pred_original_sample
+                    image = vae.decode(pred_original_sample.to(weight_dtype)).sample
+                    image = (image / 2 + 0.5).clamp(0, 1)
+
+                    # image normalization, depends on different reward models
+                    # This step is necessary. It took us a long time to find out this issue
+                    # import IPython; IPython.embed()
+                    if args.task_name == 'depth':
+                        image = torchvision.transforms.functional.resize(image, (384, 384))
+                        image = normalize(image, (0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+                    elif args.task_name in ['canny', 'lineart', 'hed']:
+                        pass
+                    else:
+                        image = normalize(image, (0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
+
+                    # reward model inference
+                    if args.task_name == 'canny':
+                        outputs = reward_model(image.to(accelerator.device), low_threshold, high_threshold)
+                    else:
+                        outputs = reward_model(image.to(accelerator.device))
+
+                    # normalize the predicted depth to (0, 1]
+                    if type(outputs) == transformers.modeling_outputs.DepthEstimatorOutput:
+
+                        # map predicted depth into [0, 1]
+                        outputs = outputs.predicted_depth
+                        outputs = torchvision.transforms.functional.resize(outputs, (args.resolution, args.resolution), interpolation=transforms.InterpolationMode.BILINEAR)
+                        max_values = outputs.view(args.train_batch_size, -1).amax(dim=1, keepdim=True).view(args.train_batch_size, 1, 1)
+                        outputs = outputs / max_values
+
+                        # map label into [0, 1]
+                        labels = batch["labels"].mean(dim=1)  # (N, 3, H, W) -> (N, H, W)
+                        max_values = labels.view(labels.size(0), -1).max(dim=1)[0]
+                        labels = labels / max_values.view(-1, 1, 1)
+
+                    # kornia.filters.canny return a tuple with (magnitude, edge)
+                    elif args.task_name == 'canny':
+                        outputs = outputs[0]   # (B, 1, H, W)
+                    elif args.task_name in ['lineart', 'hed']:
+                        pass
+                    else:
+                        labels = batch["labels"]
+
+                    # Avoid nan loss when using FP16 (happen in softmax)
+                    # FP32 and BF16 both work well
+                    if image.dtype == torch.float16:
+                        if isinstance(outputs, torch.Tensor):
+                            outputs = outputs.to(torch.float32)
+                            labels = labels.to(torch.float32)
+                        elif isinstance(outputs, list):
+                            outputs = [x.to(torch.float32) for x in outputs]
+                            labels = [x.to(torch.float32) for x in labels]
+                        else:
+                            raise NotImplementedError
+
+                    # For depth and segmentation, we resize the label to the size of model output
+                    if args.task_name == 'segmentation':
+                        labels = label_transform(labels, args.task_name, args.dataset_name, output_size=outputs.shape[-2:])
+                    elif args.task_name in ['depth', 'canny', 'lineart', 'hed']:
+                        labels = label_transform(labels, args.task_name, args.dataset_name)
+                    else:
+                        raise NotImplementedError(f"Not support task: {args.task_name}.")
+
+                    labels = [x.to(accelerator.device) for x in labels] if isinstance(labels, list) else labels.to(accelerator.device)
+
+                    # Determine which samples in the current batch need to calculate reward loss
+                    timestep_mask = (args.min_timestep_rewarding <= timesteps.reshape(-1, 1)) & (timesteps.reshape(-1, 1) <= args.max_timestep_rewarding)
+
+                    # calculate the reward loss
+                    reward_loss = get_reward_loss(outputs, labels, args.task_name, reduction='none')
+
+                    # Reawrd Loss: (B, H, W)  =>  (B)
+                    if args.task_name == 'segmentation':
+                        # remove background class for the segmentation task
+                        background_mask = (labels != 255).float()
+                        reward_loss = (background_mask * reward_loss).sum(dim=(-1,-2)) / (background_mask.sum(dim=(-1,-2)) + 1e-10)
+                    elif args.task_name == 'canny':
+                        pass
+                    else:
+                        reward_loss = reward_loss.mean(dim=(-1,-2))
+
+                    reward_loss = reward_loss.reshape_as(timestep_mask)
+                    reward_loss = (timestep_mask * reward_loss).sum() / (timestep_mask.sum() + 1e-10)
+                    
+                    reward_scale = min(1.0, global_step / args.linear_reward_scale_steps)
+                    loss = pretrain_loss + reward_loss * args.grad_scale * reward_scale
                     
                 else:
                     # Sample noise that we'll add to the latents
@@ -1685,7 +1779,7 @@ def main(args):
                 train_loss, train_pretrain_loss, train_reward_loss = 0., 0., 0.
 
                 if accelerator.is_main_process:
-                    if global_step % args.checkpointing_steps == 0:
+                    if global_step % args.checkpointing_steps == 1:
                         # directly save the state_dict
                         if accelerator.distributed_type != accelerate.DistributedType.FSDP:
                             save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
@@ -1725,7 +1819,7 @@ def main(args):
             # accelerator.log(logs, step=global_step)
 
             # FSDP save model need to call all the ranks
-            if global_step % args.checkpointing_steps == 0:
+            if global_step % args.checkpointing_steps == 1:
                 if accelerator.distributed_type == accelerate.DistributedType.FSDP:
                     save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
                     accelerator.save_state(save_path)

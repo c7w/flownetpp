@@ -28,6 +28,10 @@ transforms = Compose([
     Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
 ])
 
+import sys
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+import rectified_flow
+
 from PIL import PngImagePlugin
 MaximumDecompressedsize = 1024
 MegaByte = 2**20
@@ -70,10 +74,11 @@ def main(args):
         )
     else:
          # Loading from local disk.
-        dataset = load_from_disk(
-            dataset_path=args.dataset_name,
-            split=args.dataset_split
-        )
+        # dataset = load_from_disk(
+        #     dataset_path=args.dataset_name,
+        #     split=args.dataset_split
+        # )
+        dataset = load_dataset('parquet', data_files=f'{args.dataset_name}/validation-*.parquet')["train"]
 
     print(f"Loading pre-trained weights from {args.model_path}")
 
@@ -128,7 +133,7 @@ def main(args):
             model.eval()
 
     # only the main process will create the output directory
-    save_dir = os.path.join(args.output_dir, args.dataset_name.split('/')[-1], args.dataset_split, args.model_path.replace('/', '_'))
+    save_dir = os.path.join(args.output_dir, args.dataset_name.split('/')[-1], args.dataset_split, args.exp_name)
 
     save_dir = save_dir + '_' + str(args.guidance_scale) + '-' + str(args.num_inference_steps)
     if distributed_state.is_main_process:
@@ -143,7 +148,9 @@ def main(args):
                 os.makedirs(os.path.join(save_dir, f"images/group_{i}"))
 
     if args.model == 'controlnet':
-        if args.ddim:
+        if args.rflow:
+            pipe.scheduler = rectified_flow.FlowMatchEulerDiscreteScheduler(num_train_timesteps=1000, shift=3.0)
+        elif args.ddim:
             pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
         else:
             pipe.scheduler = UniPCMultistepScheduler.from_config(pipe.scheduler.config)
@@ -203,24 +210,26 @@ def main(args):
             condition = condition.resize((args.resolution, args.resolution), Image.Resampling.NEAREST)
             prompts, conditions = [prompt] * args.batch_size, [condition] * args.batch_size
 
-            # return a list of PIL images with given resolution
-            if args.model == 't2i-adapter-sdxl' and args.task_name == 'lineart':
-                images = pipe(
-                    prompt=prompts,
-                    image=conditions,
-                    num_inference_steps=args.num_inference_steps,
-                    guidance_scale=args.guidance_scale,
-                    adapter_conditioning_scale=0.5,
-                    negative_prompt=['worst quality, low quality'] *  args.batch_size
-                ).images
-            else:
-                images = pipe(
-                    prompt=prompts,
-                    image=conditions,
-                    num_inference_steps=args.num_inference_steps,
-                    guidance_scale=args.guidance_scale,
-                    negative_prompt=['worst quality, low quality'] *  args.batch_size
-                ).images
+            import IPython; IPython.embed()
+            # TODO: change the inference logic here
+            # # return a list of PIL images with given resolution
+            # if args.model == 't2i-adapter-sdxl' and args.task_name == 'lineart':
+            #     images = pipe(
+            #         prompt=prompts,
+            #         image=conditions,
+            #         num_inference_steps=args.num_inference_steps,
+            #         guidance_scale=args.guidance_scale,
+            #         adapter_conditioning_scale=0.5,
+            #         negative_prompt=['worst quality, low quality'] *  args.batch_size
+            #     ).images
+            # else:
+            #     images = pipe(
+            #         prompt=prompts,
+            #         image=conditions,
+            #         num_inference_steps=args.num_inference_steps,
+            #         guidance_scale=args.guidance_scale,
+            #         negative_prompt=['worst quality, low quality'] *  args.batch_size
+            #     ).images
 
             if args.task_name == 'canny':
                 canny_edges = [F.pil_to_tensor(img)/255.0 for img in images]
@@ -322,7 +331,26 @@ if __name__ == "__main__":
     parser.add_argument('--model', type=str, default="controlnet")
     parser.add_argument('--ddim', action='store_true', help='weather use DDIM instead of UniPC')
     parser.add_argument('--num_inference_steps', type=int, default=20, help='Number of inference steps')
-
+    parser.add_argument(
+        "--rflow", action="store_true"
+    )
+    parser.add_argument(
+        "--weighting_scheme",
+        type=str,
+        default="logit_normal",
+        choices=["sigma_sqrt", "logit_normal", "mode", "cosmap"],
+    )
+    parser.add_argument(
+        "--logit_mean", type=float, default=0.0, help="mean to use when using the `'logit_normal'` weighting scheme."
+    )
+    parser.add_argument("--logit_std", type=float, default=1.0, help="std to use when using the `'logit_normal'` weighting scheme.")
+    parser.add_argument(
+        "--mode_scale",
+        type=float,
+        default=1.29,
+        help="Scale of mode weighting scheme. Only effective when using the `'mode'` as the `weighting_scheme`.",
+    )
+    parser.add_argument("--exp_name", type=str, default="debug")
     args = parser.parse_args()
     main(args)
 
