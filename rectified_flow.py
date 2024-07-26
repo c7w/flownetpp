@@ -154,7 +154,7 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
         self.sigma_min = self.sigmas[-1].item()
         self.sigma_max = self.sigmas[0].item()
         
-        self.scheduler.init_noise_sigma = self.sigmas[0].item()
+        self.init_noise_sigma = self.sigmas[0].item()
 
     @property
     def step_index(self):
