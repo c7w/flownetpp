@@ -6,12 +6,14 @@ import numpy as np
 import torchvision.transforms.functional as F
 import argparse
 import cv2
+from tqdm import tqdm
+import math
 
 from matplotlib import pyplot as plt
 from torchvision.utils import make_grid
 from diffusers import (
     T2IAdapter, StableDiffusionAdapterPipeline,
-    StableDiffusionControlNetPipeline, ControlNetModel,
+    StableDiffusionControlNetPipeline, ControlNetModel, UNet2DConditionModel,
     UniPCMultistepScheduler, DDIMScheduler,
     StableDiffusionXLAdapterPipeline, T2IAdapter, EulerAncestralDiscreteScheduler,
     StableDiffusionXLControlNetPipeline, AutoencoderKL
@@ -38,6 +40,7 @@ MegaByte = 2**20
 PngImagePlugin.MAX_TEXT_CHUNK = MaximumDecompressedsize * MegaByte
 Image.MAX_IMAGE_PIXELS = None
 
+from diffusers.utils.pil_utils import PIL_INTERPOLATION
 
 def seed_torch(seed=1):
     random.seed(seed)
@@ -59,6 +62,36 @@ def show(imgs):
         img = F.to_pil_image(img)
         axs[0, i].imshow(np.asarray(img))
         axs[0, i].set(xticklabels=[], yticklabels=[], xticks=[], yticks=[])
+
+def get_noise(seed, latent):
+    generator = torch.manual_seed(seed)
+    return torch.randn(latent.size(), dtype=torch.float32, layout=latent.layout, generator=generator, device="cpu").to(latent.dtype)
+
+def get_sigmas(sampling: rectified_flow.ModelSamplingDiscreteFlow, steps):
+    start = sampling.timestep(sampling.sigma_max)
+    end = sampling.timestep(sampling.sigma_min)
+    timesteps = torch.linspace(start, end, steps)
+    sigs = []
+    for x in range(len(timesteps)):
+        ts = timesteps[x]
+        sigs.append(sampling.sigma(ts))
+    sigs += [0.0]
+    return torch.FloatTensor(sigs)
+
+
+def max_denoise(model_sampling, sigmas):
+    max_sigma = float(model_sampling.sigma_max)
+    sigma = float(sigmas[0])
+    return math.isclose(max_sigma, sigma, rel_tol=1e-05) or sigma > max_sigma
+
+def preprocess_image(image, batch_size):
+    w, h = image.size
+    w, h = (x - x % 8 for x in (w, h))  # resize to integer multiple of 8
+    image = image.resize((w, h), resample=PIL_INTERPOLATION["lanczos"])
+    image = np.array(image).astype(np.float32) / 255.0
+    image = np.vstack([image[None].transpose(0, 3, 1, 2)] * batch_size)
+    image = torch.from_numpy(image)
+    return 2.0 * image - 1.0
 
 def main(args):
     distributed_state = PartialState()
@@ -86,9 +119,16 @@ def main(args):
     with distributed_state.main_process_first():
         # load pre-trained model
         if args.model == 'controlnet':
-            controlnet = ControlNetModel.from_pretrained(args.model_path, torch_dtype=torch.float16)
+            ctrlnet_path = os.path.join(args.model_path, "ControlNetModel")
+            sd_path = os.path.join(args.model_path, "UNet2DConditionModel")
+            controlnet = ControlNetModel.from_pretrained(ctrlnet_path, torch_dtype=torch.float16)
+            if os.path.exists(sd_path):
+                sd = UNet2DConditionModel.from_pretrained(sd_path, torch_dtype=torch.float16)
+            else:
+                sd = None
             pipe = StableDiffusionControlNetPipeline.from_pretrained(
                 pretrained_model_name_or_path=args.sd_path,
+                unet=sd if sd is not None else None,
                 controlnet=controlnet,
                 safety_checker=None,
                 torch_dtype=torch.float16
@@ -210,7 +250,90 @@ def main(args):
             condition = condition.resize((args.resolution, args.resolution), Image.Resampling.NEAREST)
             prompts, conditions = [prompt] * args.batch_size, [condition] * args.batch_size
 
-            import IPython; IPython.embed()
+            height, width = args.resolution, args.resolution
+            device = distributed_state.device
+            latent = torch.zeros(args.batch_size, 4, height // 8, width // 8, device=device)
+            
+            noise = get_noise(args.seed, latent).to(device)
+            model_sampling = rectified_flow.ModelSamplingDiscreteFlow(shift=3.0)  # 3.0 is for SD3
+            sigmas = get_sigmas(model_sampling, steps=args.num_inference_steps).to(device)
+            
+            noise_scaled = model_sampling.noise_scaling(sigmas[0], noise, latent, max_denoise(model_sampling, sigmas))
+            
+            prompt, negative_prompt = prompts, ['worst quality, low quality'] * args.batch_size
+            
+            
+            prompt_embeds, negative_prompt_embeds = pipe.encode_prompt(
+                prompt,
+                device,
+                num_images_per_prompt=1,
+                do_classifier_free_guidance=True,
+                negative_prompt=negative_prompt,
+            )
+            prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds])
+            latents = noise_scaled
+            
+            # prepare condition
+            preprocessed_conditions = pipe.prepare_image(
+                image=conditions,
+                width=args.resolution,
+                height=args.resolution,
+                batch_size=args.batch_size,
+                num_images_per_prompt=1,
+                device=device,
+                dtype=controlnet.dtype,
+                do_classifier_free_guidance=True,
+            )
+            
+            
+            with torch.autocast(device_type="cuda", dtype=torch.float32):
+                with torch.no_grad():
+                    for i in tqdm(range(len(sigmas) - 1)):
+                        sigma_hat = sigmas[i]
+                        timestep = model_sampling.timestep(sigma_hat).float()
+                        
+                        latent_model_input = torch.cat([latents] * 2)
+
+                        down_block_res_samples, mid_block_res_sample = pipe.controlnet(
+                            latent_model_input,
+                            timestep,
+                            encoder_hidden_states=prompt_embeds,
+                            controlnet_cond=preprocessed_conditions,
+                            return_dict=False,
+                        )
+                        
+                        model_output = pipe.unet(
+                            latent_model_input,
+                            timestep,
+                            encoder_hidden_states=prompt_embeds,
+                            down_block_additional_residuals=down_block_res_samples,
+                            mid_block_additional_residual=mid_block_res_sample,
+                            return_dict=False,
+                        )[0]
+                        
+                        batched = model_sampling.calculate_denoised(sigma_hat, model_output, latent_model_input)
+                        neg_out, pos_out = torch.chunk(batched, 2, dim=0)
+                        denoised = neg_out + (pos_out - neg_out) * args.guidance_scale
+                        
+                        dims_to_append = latent_model_input.ndim - sigma_hat.ndim
+                        sigma_hat_dims = sigma_hat[(...,) + (None,) * dims_to_append]
+                        
+                        d = (latents - denoised) / sigma_hat_dims
+                        dt = sigmas[i + 1] - sigma_hat
+                        
+                        latents = latents + d * dt
+                        
+                        # LOG denoised
+                        if True:
+                            decoded_images = pipe.decode_latents(denoised) # decode the denoised image
+                            for j in range(args.batch_size):
+                                img = Image.fromarray((decoded_images[j] * 255).astype(np.uint8))
+                                img.save(f"{save_dir}/images/group_{j}/{uid}_denoised_{i}.png")
+                        
+                    image = pipe.vae.decode(latents / pipe.vae.config.scaling_factor, return_dict=False)[0]
+                    images = pipe.image_processor.postprocess(image, output_type="pil", do_denormalize=[True] * image.shape[0])
+
+                        
             # TODO: change the inference logic here
             # # return a list of PIL images with given resolution
             # if args.model == 't2i-adapter-sdxl' and args.task_name == 'lineart':

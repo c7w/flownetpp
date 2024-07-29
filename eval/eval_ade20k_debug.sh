@@ -1,19 +1,20 @@
 # Path to the controlnet weight (can be huggingface or local path)
 # export CONTROLNET_DIR="lllyasviel/control_v11p_sd15_seg"  # Eval ControlNet
-export CONTROLNET_DIR="checkpoints/seg/controlnet"  # Eval our ControlNet++
+export CONTROLNET_DIR="work_dirs/reward_model/Captioned_ADE20K/1reward_ft_controlnet_sd15_seg_res512_bs256_lr1e-5_warmup100_scale-0.5_iter5k_fp16_train0-1k_reward0-200_UperNet-R50/test_Jul26_21-10-24/checkpoint-1"  # Eval our ControlNet++
 # How many GPUs and processes you want to use for evaluation.
 export NUM_GPUS=1
 # Guidance scale and inference steps
 export SCALE=1
 export NUM_STEPS=20
 
-
+export CUDA_VISIBLE_DEVICES=1
+export HF_ENDPOINT=https://hf-mirror.com
 
 # bash eval/eval_ade20k.sh --model_path /data/Tsinghua/chihh/CPP_Uncertainty/work_dirs/reward_model/Captioned_ADE20K/1reward_ft_controlnet_sd15_seg_res512_bs256_lr1e-5_warmup100_scale-0.5_iter5k_fp16_train0-1k_reward0-200_UperNet-R50/uncertainty-1_Jul26_23-11-53/checkpoint-2000/controlnet --exp_name r0
 
 # Generate images for evaluation
 # If the command is interrupted unexpectedly, just run the code again. We will skip the already generated images.
-accelerate launch --main_process_port=24687 --num_processes=$NUM_GPUS eval/eval.py --task_name='seg' --dataset_name="/Node10_nvme/Captioned_ADE20K/data" --dataset_split='validation' --condition_column='control_seg' --prompt_column='prompt' --label_column='seg_map' --model_path=${CONTROLNET_DIR} --guidance_scale=${SCALE} --num_inference_steps=${NUM_STEPS} $*
+accelerate launch --config_file "train/debug.yml" --main_process_port=24687 eval/eval.py --task_name='seg' --dataset_name="/Node10_nvme/Captioned_ADE20K/data" --dataset_split='validation' --condition_column='control_seg' --prompt_column='prompt' --label_column='seg_map' --model_path=${CONTROLNET_DIR} --guidance_scale=${SCALE} --num_inference_steps=${NUM_STEPS} $*
 
 # # Path to the above generated images
 # # guidance_scale=7.5, sampling_steps=20 by default
