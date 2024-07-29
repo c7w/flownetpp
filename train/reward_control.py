@@ -134,7 +134,7 @@ def log_validation(
         torch_dtype=weight_dtype,
     )
     if args.rflow:
-        pipeline.scheduler = rectified_flow.FlowMatchEulerDiscreteScheduler(num_train_timesteps=1000, shift=3.0)
+        pipeline.scheduler = rectified_flow.FlowMatchEulerDiscreteScheduler(num_train_timesteps=1000, shift=args.shift)
     else:
         pipeline.scheduler = UniPCMultistepScheduler.from_config(pipeline.scheduler.config)
     pipeline = pipeline.to(accelerator.device)
@@ -799,6 +799,12 @@ def parse_args(input_args=None):
         help="Scale of mode weighting scheme. Only effective when using the `'mode'` as the `weighting_scheme`.",
     )
     parser.add_argument(
+        "--shift",
+        type=float,
+        default=6.0,
+        help="Tune the shift of logit norm.",
+    )
+    parser.add_argument(
         "--tune_sd", action="store_true"
     )
     parser.add_argument(
@@ -1139,7 +1145,7 @@ def main(args):
     # Load scheduler and models
     # noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
     if args.rflow:
-        noise_scheduler = rectified_flow.FlowMatchEulerDiscreteScheduler(num_train_timesteps=1000, shift=3.0)
+        noise_scheduler = rectified_flow.FlowMatchEulerDiscreteScheduler(num_train_timesteps=1000, shift=args.shift)
         noise_scheduler_copy = copy.deepcopy(noise_scheduler)
     else:
         noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")

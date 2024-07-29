@@ -324,14 +324,14 @@ def main(args):
                         latents = latents + d * dt
                         
                         # LOG denoised
-                        if True:
-                            decoded_images = pipe.decode_latents(denoised) # decode the denoised image
-                            for j in range(args.batch_size):
-                                img = Image.fromarray((decoded_images[j] * 255).astype(np.uint8))
-                                img.save(f"{save_dir}/images/group_{j}/{uid}_denoised_{i}.png")
+                        # if True:
+                        #     decoded_images = pipe.decode_latents(denoised) # decode the denoised image
+                        #     for j in range(args.batch_size):
+                        #         img = Image.fromarray((decoded_images[j] * 255).astype(np.uint8))
+                        #         img.save(f"{save_dir}/images/group_{j}/{uid}_denoised_{i}.png")
                         
-                    image = pipe.vae.decode(latents / pipe.vae.config.scaling_factor, return_dict=False)[0]
-                    images = pipe.image_processor.postprocess(image, output_type="pil", do_denormalize=[True] * image.shape[0])
+                    images = pipe.vae.decode(latents / pipe.vae.config.scaling_factor, return_dict=False)[0]
+                    images = pipe.image_processor.postprocess(images, output_type="pil", do_denormalize=[True] * images.shape[0])
 
                         
             # TODO: change the inference logic here
@@ -511,4 +511,4 @@ if __name__ == "__main__":
 
 # Depth: accelerate launch --main_process_port=12456 --num_processes=4 controlnet/eval.py --task_name='depth' --dataset_name='limingcv/MultiGen-20M_depth_eval' --dataset_split='validation' --condition_column='control_depth' --prompt_column='text'  --label_column='control_depth' --model_path='TencentARC/t2i-adapter-depth-midas-sdxl-1.0' --sd_path='stabilityai/stable-diffusion-xl-base-1.0' --model='t2i-adapter-sdxl' --num_inference_steps=50 --resolution 1024
 
-# LineArt: accelerate launch --main_process_port=23333 --num_processes=4 controlnet/eval.py --task_name='lineart' --dataset_name='limingcv/MultiGen-20M_canny_eval' --dataset_split='validation' --condition_column='image' --prompt_column='text' --model_path='TencentARC/t2i-adapter-lineart-sdxl-1.0' --sd_path='stabilityai/stable-diffusion-xl-base-1.0' --model='t2i-adapter-sdxl' --num_inference_steps=50 --resolution 1024
+# LineArt: accelerate launch --main_process_port=23333 --num_processes=4 controlnet/eval.py --task_name='lineart' --dataset_name='limingcv/MultiGen-20M_canny_eval' --dataset_split='validation' --condition_column='image' --prompt_column='text' --model_path='TencentARC/t2i-adapter-lineart-sdxl-1.0' --sd_path='stabilityai/stable-diffusion-xl-base-1.0' --model='t2i-adapter-sdxl' --num_inference_steps=50 --resol
