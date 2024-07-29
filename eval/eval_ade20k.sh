@@ -13,7 +13,7 @@ export NUM_STEPS=20
 
 # Generate images for evaluation
 # If the command is interrupted unexpectedly, just run the code again. We will skip the already generated images.
-accelerate launch --main_process_port=24687 --num_processes=$NUM_GPUS eval/eval.py --task_name='seg' --dataset_name="/Node10_nvme/Captioned_ADE20K/data" --dataset_split='validation' --condition_column='control_seg' --prompt_column='prompt' --label_column='seg_map' --model_path=${CONTROLNET_DIR} --guidance_scale=${SCALE} --num_inference_steps=${NUM_STEPS} $*
+accelerate launch --main_process_port=$(python3 random_port.py) --num_processes=$NUM_GPUS eval/eval.py --task_name='seg' --dataset_name="/Node10_nvme/Captioned_ADE20K/data" --dataset_split='validation' --condition_column='control_seg' --prompt_column='prompt' --label_column='seg_map' --model_path=${CONTROLNET_DIR} --guidance_scale=${SCALE} --num_inference_steps=${NUM_STEPS} $*
 
 # # Path to the above generated images
 # # guidance_scale=7.5, sampling_steps=20 by default
